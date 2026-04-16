@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package events.v1;
+
+option go_package = "github.com/SheykoWk/event-streaming-and-audit/gen/proto/events;eventsv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// Event is an immutable domain fact stored in the append-only event log.
+message Event {
+  string id        = 1; // UUID v4
+  string stream_id = 2; // Logical stream (e.g. "order:42", "user:7")
+  string type      = 3; // Namespaced event type (e.g. "order.created")
+  string source    = 4; // Originating service (e.g. "orders-service")
+  int64  version   = 5; // Monotonically increasing per stream
+
+  google.protobuf.Timestamp occurred_at = 6;
+  google.protobuf.Struct    payload     = 7; // Domain-specific data
+  map<string, string>       metadata    = 8; // Cross-cutting (trace_id, user_id, correlation_id…)
+}
+
+// IngestRequest is the write model for the ingest API.
+message IngestRequest {
+  string stream_id = 1;
+  string type      = 2;
+  string source    = 3;
+  google.protobuf.Struct payload  = 4;
+  map<string, string>    metadata = 5;
+}
+
+// IngestResponse confirms durable storage and the assigned version.
+message IngestResponse {
+  string event_id = 1;
+  int64  version  = 2;
+}
+
+// ReplayRequest defines range parameters for stream replay.
+message ReplayRequest {
+  string stream_id    = 1;
+  int64  from_version = 2; // Inclusive; 0 = from beginning
+  int64  to_version   = 3; // Inclusive; 0 = latest
+
+  google.protobuf.Timestamp from_time = 4; // Optional time-range filter
+  google.protobuf.Timestamp to_time   = 5;
+}
+
+// EventStream is a ordered sequence of events for a stream.
+message EventStream {
+  string         stream_id = 1;
+  repeated Event events    = 2;
+}
+
+service EventService {
+  rpc Ingest(IngestRequest)  returns (IngestResponse);
+  rpc Replay(ReplayRequest)  returns (EventStream);
+}
