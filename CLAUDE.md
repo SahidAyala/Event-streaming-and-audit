@@ -1,81 +1,248 @@
-# CLAUDE.md
+# Claude Context — Event Streaming & Audit Platform
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## 🧠 System Purpose
 
-## Project Overview
+A distributed event streaming and audit platform designed to:
 
-A distributed event-driven platform for storing, replaying, and analyzing system events. Supports event sourcing, audit logging, and time-travel debugging. Currently in the blueprint/early-implementation phase.
+* Capture events reliably (append-only)
+* Provide a consistent audit trail
+* Enable event replay for debugging and recovery
+* Support scalable read models via indexing
 
-## Commands
+This system prioritizes **correctness, durability, and traceability over convenience**.
 
-```bash
-pnpm test          # Run unit tests (Vitest)
-pnpm test:cov      # Run tests with coverage report
-npx tsc            # TypeScript type check
-```
+---
 
-Use `/commit`, `/test`, and `/pr` slash commands for guided workflows.
+## 🧱 Architecture
 
-## Architecture
+* Hexagonal Architecture (Ports & Adapters)
 
-The platform is composed of five layers that flow in sequence:
+### Layers
 
-```
-Event Producers → Event Bus (Kafka/Redpanda) → Event Store (PostgreSQL, append-only)
-                                                        ↓
-                                          Query Layer (Elasticsearch)
-                                                        ↓
-                                             Replay Engine + Snapshots
-```
+* **Domain**
 
-**Storage tiers:** PostgreSQL for hot/active event storage, S3 for cold/archival storage.
+  * Pure business logic
+  * No external dependencies
+  * Defines:
 
-**Key design constraints:**
-- Event store is **append-only** and immutable — no updates or deletes
-- Events must carry versioning metadata to support schema evolution
-- Replay engine must handle duplicates, partial writes, and out-of-order delivery
+    * Event entity (immutable)
+    * Repository interfaces (Store, Publisher, Indexer)
 
-## Source Structure
+* **Application**
 
-Code is organized by DDD bounded contexts:
+  * Use cases:
 
-```
-src/contexts/<module>/
-  application/      # Services, use cases (*.service.ts, *.service.spec.ts)
-  domain/           # Aggregates, entities, domain events, value objects
-  infrastructure/   # Repository implementations, Kafka adapters, Prisma
-```
+    * Ingest events
+    * Consume events
+    * Query events (to be implemented)
+    * Replay events (to be implemented)
 
-## Commit Conventions
+* **Infrastructure**
 
-Format: `type(scope): description`
+  * PostgreSQL → Event Store
+  * Kafka → Event Bus
+  * Elasticsearch → Read Model
+  * HTTP → Ingest API
+  * gRPC → Replay API (planned)
 
-- **scope** = module name derived from `src/contexts/<module>` (e.g., `events`, `replay`, `audit`)
-- **types:** `feat`, `fix`, `refactor`, `test`, `chore`, `docs`
-- Group changes by logical unit, not by file — max 5 commits per batch
-- Never add `Co-Authored-By` in this repo
+---
 
-Examples:
-```
-feat(events): Add append-only event store schema
-test(replay): Add unit tests for replay engine service
-refactor(audit): Move immutability check into domain aggregate
-```
+## 📊 Data Flow (Source of Truth Model)
 
-## Testing
+1. HTTP POST /events
+2. Application layer validates event
+3. Event is appended to PostgreSQL (source of truth)
+4. Event is published to Kafka (async)
+5. Consumer reads from Kafka
+6. Event is indexed into Elasticsearch
 
-- Framework: **Vitest**
-- Test files: `*.spec.ts` co-located with the source file they test
-- Mock repositories, test business logic — happy path, validation errors, and edge cases
-- Do not modify production code when writing or fixing tests
-- Keep mocks consistent with DDD architecture (mock at the repository boundary)
+### Important
 
-## Pull Requests
+* PostgreSQL is the **single source of truth**
+* Kafka is **not authoritative**
+* Elasticsearch is **eventually consistent**
 
-PRs always target `main`. Before creating, ensure the branch is up-to-date with main. Branch naming convention: `type/ticket-description` (e.g., `feat/42-add-event-ingestion`).
+---
 
-PR title follows the same `type(scope): description` format as commits.
+## ⚙️ System Guarantees
 
-## Architect Agent
+* Append-only event store
+* Per-stream versioning (`stream_id`, `version`)
+* At-least-once delivery (Kafka consumer)
+* Idempotent indexing (Elasticsearch)
+* Immutable event data
+* No in-place updates
 
-Use the `Architect` agent (invoked on request) for DDD code reviews. It reviews code for correct bounded context separation, aggregate design, and domain event modeling.
+---
+
+## 🚫 Non-Goals (Current Scope)
+
+* No exactly-once delivery
+* No distributed transactions
+* No strong consistency across services
+* No schema registry (yet)
+* No multi-region support
+
+---
+
+## ⚠️ Current Limitations
+
+* No Query API (GET /events/{streamID})
+* No Replay Engine
+* No Snapshots
+* No DLQ (dead-letter queue) for Kafka
+* No time-travel debugging
+* No S3/MinIO archival
+* No test coverage
+
+---
+
+## 🎯 Design Principles
+
+* Favor **durability over latency**
+* Favor **simplicity over premature optimization**
+* Prefer **idempotent operations**
+* Keep domain layer isolated
+* Avoid leaking infrastructure concerns into application logic
+* Treat event ordering as critical per stream
+
+---
+
+## 🔐 Data Integrity Rules
+
+* Version must be strictly increasing per stream
+* Writes must be atomic (PostgreSQL transaction)
+* Consumers must tolerate duplicate events
+* Indexing must be idempotent
+* Replay must always read from PostgreSQL
+
+---
+
+## 🧩 Key Concepts
+
+* **Event**
+
+  * Immutable record
+  * Contains:
+
+    * id
+    * stream_id
+    * version
+    * type
+    * payload
+    * timestamp
+
+* **Stream**
+
+  * Logical grouping of events
+  * Ordering guaranteed per stream only
+
+* **Read Model**
+
+  * Derived projection stored in Elasticsearch
+  * Can be rebuilt from event store
+
+---
+
+## 🛠️ Implementation Rules (STRICT)
+
+* Do NOT bypass application layer
+* Do NOT query PostgreSQL directly from HTTP layer
+* Do NOT treat Kafka as source of truth
+* Do NOT mutate events after persistence
+* Do NOT introduce shared state outside DB
+
+---
+
+## 📦 Current Components Status
+
+| Component              | Status       |
+| ---------------------- | ------------ |
+| Event Store (Postgres) | ✅ Complete   |
+| Kafka Producer         | ✅ Complete   |
+| Kafka Consumer         | ✅ Functional |
+| Elasticsearch Indexer  | ⚠️ Partial   |
+| HTTP Ingest API        | ✅ Complete   |
+| Query API              | ❌ Missing    |
+| Replay Engine          | ❌ Missing    |
+| Tests                  | ❌ Missing    |
+
+---
+
+## 🚀 MVP Roadmap (Execution Order)
+
+1. Fix build + dependencies ✅ (done)
+2. Query API (GET /events/{streamID})
+3. Basic Replay Engine (gRPC)
+4. Add test coverage (core services)
+5. Kafka DLQ + retry strategy
+6. Observability (logs + metrics)
+7. S3/MinIO archival
+8. Snapshots
+9. Time-travel debugging
+
+---
+
+## ⚡ Performance Expectations (Target)
+
+* Ingest latency: < 50ms (without Kafka dependency)
+* Kafka throughput: scalable horizontally
+* Replay: linear per stream
+* Indexing: eventual consistency (< seconds)
+
+---
+
+## 🧪 Testing Strategy (Planned)
+
+* Unit tests for application layer
+* Mock ports (Store, Publisher, Indexer)
+* Integration tests with Postgres + Kafka (later)
+* Replay correctness tests (ordering + idempotency)
+
+---
+
+## 🔍 Observability (Planned)
+
+* Structured logging (slog)
+* Correlation IDs per request
+* Metrics:
+
+  * ingest rate
+  * consumer lag
+  * indexing latency
+  * replay duration
+
+---
+
+## ⚠️ Critical Risks
+
+* Race conditions in Kafka consumer (no DLQ yet)
+* Event duplication due to at-least-once delivery
+* Elasticsearch inconsistency vs Postgres
+* Missing replay → limits audit/debug capability
+
+---
+
+## 🧠 Guidance for AI (Claude)
+
+When modifying or extending the system:
+
+* Always respect hexagonal boundaries
+* Never introduce tight coupling between layers
+* Prioritize correctness over performance
+* Ask before introducing new infrastructure
+* Prefer minimal, production-correct solutions
+
+---
+
+## 📌 Definition of Done (MVP)
+
+The system is considered MVP-complete when:
+
+* Events can be ingested reliably
+* Events can be queried by stream (ordered)
+* Events can be replayed from Postgres
+* System handles duplicates safely
+* Basic test coverage exists
+
+---
