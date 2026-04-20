@@ -18,9 +18,10 @@ type PostgresConfig struct {
 }
 
 type KafkaConfig struct {
-	Brokers []string
-	Topic   string
-	GroupID string
+	Brokers  []string
+	Topic    string
+	GroupID  string
+	DLQTopic string
 }
 
 type ElasticsearchConfig struct {
@@ -37,9 +38,10 @@ func Load() *Config {
 		},
 		Kafka: KafkaConfig{
 			// 9094 = EXTERNAL listener exposed by docker-compose for host access
-			Brokers: strings.Split(getEnv("KAFKA_BROKERS", "localhost:9094"), ","),
-			Topic:   getEnv("KAFKA_TOPIC", "events"),
-			GroupID: getEnv("KAFKA_GROUP_ID", "consumer-service"),
+			Brokers:  strings.Split(getEnv("KAFKA_BROKERS", "localhost:9094"), ","),
+			Topic:    getEnv("KAFKA_TOPIC", "events"),
+			GroupID:  getEnv("KAFKA_GROUP_ID", "consumer-service"),
+			DLQTopic: getEnv("KAFKA_DLQ_TOPIC", "events-dlq"),
 		},
 		Elasticsearch: ElasticsearchConfig{
 			Addresses: strings.Split(getEnv("ELASTICSEARCH_ADDRS", "http://localhost:9200"), ","),

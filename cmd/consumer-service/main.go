@@ -32,10 +32,14 @@ func main() {
 	consumer := kafka.NewConsumer(cfg.Kafka, log)
 	defer consumer.Close() //nolint:errcheck
 
-	svc := consume.NewService(consumer, indexer, log)
+	dlq := kafka.NewDLQProducer(cfg.Kafka)
+	defer dlq.Close() //nolint:errcheck
+
+	svc := consume.NewService(consumer, indexer, dlq, log)
 
 	log.Info("consumer-service started",
 		"topic", cfg.Kafka.Topic,
+		"dlq_topic", cfg.Kafka.DLQTopic,
 		"group", cfg.Kafka.GroupID,
 		"brokers", cfg.Kafka.Brokers,
 	)
