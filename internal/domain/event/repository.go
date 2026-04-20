@@ -29,3 +29,17 @@ type Indexer interface {
 	Index(ctx context.Context, e *Event) error
 	Close() error
 }
+
+// SearchQuery carries parameters for reading from the read model.
+type SearchQuery struct {
+	StreamID string
+	Limit    int
+	Offset   int
+}
+
+// Searcher is the outbound port for the Elasticsearch read model.
+// Results are eventually consistent with the PostgreSQL event store —
+// recently ingested events may not yet be visible.
+type Searcher interface {
+	Search(ctx context.Context, q SearchQuery) ([]*Event, int64, error)
+}
