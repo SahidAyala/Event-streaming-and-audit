@@ -1,0 +1,75 @@
+package replay
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	"github.com/SheykoWk/event-streaming-and-audit/internal/domain/event"
+)
+
+// Command carries the parameters for a replay request.
+type Command struct {
+	StreamID    string
+	FromVersion int64 // inclusive; 0 = from the very first event
+}
+
+// Service replays events from PostgreSQL (source of truth).
+// It does not touch Elasticsearch or Kafka.
+type Service struct {
+	store event.Store
+	log   *slog.Logger
+}
+
+func NewService(store event.Store, log *slog.Logger) *Service {
+	return &Service{store: store, log: log}
+}
+
+// Replay reads events for a stream starting at fromVersion, validates that the
+// returned sequence is contiguous (no version gaps), and returns the ordered slice.
+// A detected gap is a data-integrity violation and causes the replay to fail —
+// returning partial data would produce a corrupt audit trail.
+func (s *Service) Replay(ctx context.Context, cmd Command) ([]*event.Event, error) {
+	if cmd.StreamID == "" {
+		return nil, fmt.Errorf("stream_id is required")
+	}
+	if cmd.FromVersion < 0 {
+		return nil, fmt.Errorf("from_version must be >= 0")
+	}
+
+	events, err := s.store.GetFromVersion(ctx, cmd.StreamID, cmd.FromVersion)
+	if err != nil {
+		return nil, fmt.Errorf("read events from store: %w", err)
+	}
+
+	if err := validateContiguous(events); err != nil {
+		s.log.Error("version gap detected during replay",
+			"stream_id", cmd.StreamID,
+			"from_version", cmd.FromVersion,
+			"event_count", len(events),
+			"error", err,
+		)
+		return nil, err
+	}
+
+	s.log.Info("replay completed",
+		"stream_id", cmd.StreamID,
+		"from_version", cmd.FromVersion,
+		"event_count", len(events),
+	)
+	return events, nil
+}
+
+// validateContiguous asserts that every consecutive pair of events has
+// version[i] == version[i-1]+1. An empty or single-event slice is always valid.
+// This is O(n) over the returned slice with no additional I/O.
+func validateContiguous(events []*event.Event) error {
+	for i := 1; i < len(events); i++ {
+		prev, curr := events[i-1].Version, events[i].Version
+		if curr != prev+1 {
+			return fmt.Errorf("version gap in stream %q: missing version %d (found %d after %d)",
+				events[i].StreamID, prev+1, curr, prev)
+		}
+	}
+	return nil
+}

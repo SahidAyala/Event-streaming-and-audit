@@ -12,6 +12,9 @@ type Store interface {
 	Append(ctx context.Context, e *Event) error
 	GetByStreamID(ctx context.Context, streamID string) ([]*Event, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*Event, error)
+	// GetFromVersion returns all events for a stream with version >= fromVersion,
+	// ordered by version ASC. fromVersion=0 returns all events from the beginning.
+	GetFromVersion(ctx context.Context, streamID string, fromVersion int64) ([]*Event, error)
 }
 
 // Publisher is the outbound port for the event bus.

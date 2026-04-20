@@ -6,7 +6,8 @@ import (
 )
 
 type Config struct {
-	HTTPAddr      string
+	HTTPAddr string
+	GRPCAddr string
 	Postgres      PostgresConfig
 	Kafka         KafkaConfig
 	Elasticsearch ElasticsearchConfig
@@ -30,6 +31,7 @@ type ElasticsearchConfig struct {
 func Load() *Config {
 	return &Config{
 		HTTPAddr: getEnv("HTTP_ADDR", ":8080"),
+		GRPCAddr: getEnv("GRPC_ADDR", ":50051"),
 		Postgres: PostgresConfig{
 			DSN: getEnv("POSTGRES_DSN", "postgres://events:events@localhost:5432/events?sslmode=disable"),
 		},

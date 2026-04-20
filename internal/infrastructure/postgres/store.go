@@ -104,6 +104,32 @@ func (s *EventStore) GetByStreamID(ctx context.Context, streamID string) ([]*eve
 	return events, rows.Err()
 }
 
+// GetFromVersion returns all events for a stream with version >= fromVersion,
+// ordered by version ASC. This is the source-of-truth query for the replay engine.
+func (s *EventStore) GetFromVersion(ctx context.Context, streamID string, fromVersion int64) ([]*event.Event, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, stream_id, type, source, version, occurred_at, payload, metadata
+		FROM events
+		WHERE stream_id = $1 AND version >= $2
+		ORDER BY version ASC`,
+		streamID, fromVersion,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query from version: %w", err)
+	}
+	defer rows.Close()
+
+	var events []*event.Event
+	for rows.Next() {
+		e, err := scanEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
 // GetByID returns a single event by its UUID.
 func (s *EventStore) GetByID(ctx context.Context, id uuid.UUID) (*event.Event, error) {
 	row := s.pool.QueryRow(ctx, `
