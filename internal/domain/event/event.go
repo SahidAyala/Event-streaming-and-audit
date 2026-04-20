@@ -10,8 +10,10 @@ import (
 // Event is the core domain entity representing an immutable fact.
 // Version is set by the store on Append; callers should treat it as
 // zero until after a successful Append.
+// TenantID scopes the event to a tenant; set by the ingest service from the caller's Identity.
 type Event struct {
 	ID         uuid.UUID         `json:"id"`
+	TenantID   string            `json:"tenant_id"`
 	StreamID   string            `json:"stream_id"`
 	Type       string            `json:"type"`
 	Source     string            `json:"source"`

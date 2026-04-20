@@ -34,7 +34,9 @@ type Indexer interface {
 }
 
 // SearchQuery carries parameters for reading from the read model.
+// TenantID must be set by the application layer; the Searcher filters results to this tenant.
 type SearchQuery struct {
+	TenantID string
 	StreamID string
 	Limit    int
 	Offset   int
