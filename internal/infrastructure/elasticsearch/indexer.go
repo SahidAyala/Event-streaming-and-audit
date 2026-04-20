@@ -122,6 +122,71 @@ func (i *Indexer) Index(ctx context.Context, e *event.Event) error {
 	return nil
 }
 
+// Search queries events for a stream from Elasticsearch.
+// Results are sorted by version ASC, then id ASC for deterministic
+// tiebreaking. Returns the matching events and the total hit count
+// (useful for pagination metadata).
+func (i *Indexer) Search(ctx context.Context, q event.SearchQuery) ([]*event.Event, int64, error) {
+	body := map[string]any{
+		"query": map[string]any{
+			"term": map[string]any{"stream_id.keyword": q.StreamID},
+		},
+		"sort": []map[string]any{
+			{"version": map[string]string{"order": "asc"}},
+			{"id": map[string]string{"order": "asc"}},
+		},
+		"from":             q.Offset,
+		"size":             q.Limit,
+		"track_total_hits": true,
+	}
+
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshal search query: %w", err)
+	}
+
+	res, err := i.client.Search(
+		i.client.Search.WithContext(ctx),
+		i.client.Search.WithIndex(i.index),
+		i.client.Search.WithBody(bytes.NewReader(data)),
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("elasticsearch search request: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		b, _ := io.ReadAll(res.Body)
+		return nil, 0, fmt.Errorf("elasticsearch search [%s]: %s", res.Status(), b)
+	}
+
+	var result struct {
+		Hits struct {
+			Total struct {
+				Value int64 `json:"value"`
+			} `json:"total"`
+			Hits []struct {
+				Source json.RawMessage `json:"_source"`
+			} `json:"hits"`
+		} `json:"hits"`
+	}
+
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		return nil, 0, fmt.Errorf("decode search response: %w", err)
+	}
+
+	events := make([]*event.Event, 0, len(result.Hits.Hits))
+	for _, h := range result.Hits.Hits {
+		var e event.Event
+		if err := json.Unmarshal(h.Source, &e); err != nil {
+			return nil, 0, fmt.Errorf("unmarshal event source: %w", err)
+		}
+		events = append(events, &e)
+	}
+
+	return events, result.Hits.Total.Value, nil
+}
+
 // Close is a no-op; elasticsearch.Client uses http.DefaultTransport which
 // manages its own connection pool.
 func (i *Indexer) Close() error { return nil }

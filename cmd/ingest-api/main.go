@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/SheykoWk/event-streaming-and-audit/internal/application/ingest"
+	"github.com/SheykoWk/event-streaming-and-audit/internal/application/query"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/config"
+	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/elasticsearch"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/httpserver"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/kafka"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/postgres"
@@ -26,6 +28,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Write-side: PostgreSQL event store (source of truth).
 	store, err := postgres.NewEventStore(ctx, cfg.Postgres)
 	if err != nil {
 		log.Error("failed to init event store", "error", err)
@@ -33,11 +36,21 @@ func main() {
 	}
 	defer store.Close()
 
+	// Write-side: Kafka producer (best-effort async publish).
 	publisher := kafka.NewProducer(cfg.Kafka)
 	defer publisher.Close() //nolint:errcheck
 
-	svc := ingest.NewService(store, publisher, log)
-	router := httpserver.NewRouter(svc, log)
+	// Read-side: Elasticsearch indexer also acts as the Searcher port.
+	esIndexer, err := elasticsearch.NewIndexer(cfg.Elasticsearch)
+	if err != nil {
+		log.Error("failed to init elasticsearch", "error", err)
+		os.Exit(1)
+	}
+
+	ingestSvc := ingest.NewService(store, publisher, log)
+	querySvc := query.NewService(esIndexer, log)
+
+	router := httpserver.NewRouter(ingestSvc, querySvc, log)
 
 	srv := &http.Server{
 		Addr:         cfg.HTTPAddr,

@@ -1,24 +1,29 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/SheykoWk/event-streaming-and-audit/internal/application/ingest"
+	"github.com/SheykoWk/event-streaming-and-audit/internal/application/query"
 )
 
 type handler struct {
-	svc *ingest.Service
-	log *slog.Logger
+	ingestSvc *ingest.Service
+	querySvc  *query.Service
+	log       *slog.Logger
 }
 
 // NewRouter wires up all routes and middleware.
-func NewRouter(svc *ingest.Service, log *slog.Logger) http.Handler {
-	h := &handler{svc: svc, log: log}
+func NewRouter(ingestSvc *ingest.Service, querySvc *query.Service, log *slog.Logger) http.Handler {
+	h := &handler{ingestSvc: ingestSvc, querySvc: querySvc, log: log}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -54,7 +59,7 @@ func (h *handler) ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	e, err := h.svc.Ingest(r.Context(), ingest.Command{
+	e, err := h.ingestSvc.Ingest(r.Context(), ingest.Command{
 		StreamID: req.StreamID,
 		Type:     req.Type,
 		Source:   req.Source,
@@ -70,9 +75,50 @@ func (h *handler) ingest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, e)
 }
 
-func (h *handler) getByStream(w http.ResponseWriter, _ *http.Request) {
-	// TODO: query service + Elasticsearch read model
-	writeError(w, http.StatusNotImplemented, "query layer not yet implemented")
+// getByStream handles GET /events/{streamID}?limit=N&offset=N.
+// Results come from Elasticsearch and are eventually consistent with
+// the PostgreSQL event store. Response headers communicate this explicitly.
+func (h *handler) getByStream(w http.ResponseWriter, r *http.Request) {
+	streamID := chi.URLParam(r, "streamID")
+	if streamID == "" {
+		writeError(w, http.StatusBadRequest, "stream_id is required")
+		return
+	}
+
+	limit := parseIntParam(r, "limit", 20)
+	offset := parseIntParam(r, "offset", 0)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	result, err := h.querySvc.QueryByStream(ctx, query.Query{
+		StreamID: streamID,
+		Limit:    limit,
+		Offset:   offset,
+	})
+	if err != nil {
+		h.log.Error("query by stream failed", "stream_id", streamID, "error", err)
+		writeError(w, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	w.Header().Set("X-Read-Model", "elasticsearch")
+	w.Header().Set("X-Data-Consistency", "eventual")
+	writeJSON(w, http.StatusOK, result)
+}
+
+// parseIntParam reads an integer query parameter with a fallback default.
+// Returns the default if the param is absent, non-numeric, or negative.
+func parseIntParam(r *http.Request, key string, fallback int) int {
+	v := r.URL.Query().Get(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return fallback
+	}
+	return n
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
