@@ -8,11 +8,13 @@ import (
 	"strconv"
 	"time"
 
+	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/SheykoWk/event-streaming-and-audit/internal/application/ingest"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/application/query"
+	infraauth "github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/auth"
+	authmw "github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/httpserver/middleware"
 )
 
 type handler struct {
@@ -22,17 +24,19 @@ type handler struct {
 }
 
 // NewRouter wires up all routes and middleware.
-func NewRouter(ingestSvc *ingest.Service, querySvc *query.Service, log *slog.Logger) http.Handler {
+// The authenticator is applied to all /events routes; /health is unprotected.
+func NewRouter(ingestSvc *ingest.Service, querySvc *query.Service, authenticator infraauth.Authenticator, log *slog.Logger) http.Handler {
 	h := &handler{ingestSvc: ingestSvc, querySvc: querySvc, log: log}
 
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Recoverer)
+	r.Use(chimw.RequestID)
+	r.Use(chimw.RealIP)
+	r.Use(chimw.Recoverer)
 
 	r.Get("/health", h.health)
 
 	r.Route("/events", func(r chi.Router) {
+		r.Use(authmw.Auth(authenticator))
 		r.Post("/", h.ingest)
 		r.Get("/{streamID}", h.getByStream)
 	})

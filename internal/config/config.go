@@ -6,11 +6,21 @@ import (
 )
 
 type Config struct {
-	HTTPAddr string
-	GRPCAddr string
+	HTTPAddr      string
+	GRPCAddr      string
 	Postgres      PostgresConfig
 	Kafka         KafkaConfig
 	Elasticsearch ElasticsearchConfig
+	Auth          AuthConfig
+}
+
+// AuthConfig controls how the ingest-api authenticates incoming requests.
+// Mode "simple" uses a static API key (X-API-Key header) — suitable for local/dev.
+// Mode "jwt" validates HMAC-signed Bearer tokens — suitable for multi-tenant production.
+type AuthConfig struct {
+	Mode      string // "simple" | "jwt"
+	APIKey    string
+	JWTSecret string
 }
 
 type PostgresConfig struct {
@@ -46,6 +56,11 @@ func Load() *Config {
 		Elasticsearch: ElasticsearchConfig{
 			Addresses: strings.Split(getEnv("ELASTICSEARCH_ADDRS", "http://localhost:9200"), ","),
 			Index:     getEnv("ELASTICSEARCH_INDEX", "events"),
+		},
+		Auth: AuthConfig{
+			Mode:      getEnv("AUTH_MODE", "simple"),
+			APIKey:    getEnv("AUTH_API_KEY", "dev-api-key"),
+			JWTSecret: getEnv("AUTH_JWT_SECRET", ""),
 		},
 	}
 }

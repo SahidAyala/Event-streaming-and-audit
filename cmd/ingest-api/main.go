@@ -13,10 +13,13 @@ import (
 	"github.com/SheykoWk/event-streaming-and-audit/internal/application/ingest"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/application/query"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/config"
+	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/auth/jwt"
+	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/auth/simple"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/elasticsearch"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/httpserver"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/kafka"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/postgres"
+	infraauth "github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/auth"
 )
 
 func main() {
@@ -50,7 +53,9 @@ func main() {
 	ingestSvc := ingest.NewService(store, publisher, log)
 	querySvc := query.NewService(esIndexer, log)
 
-	router := httpserver.NewRouter(ingestSvc, querySvc, log)
+	authenticator := buildAuthenticator(cfg.Auth, log)
+
+	router := httpserver.NewRouter(ingestSvc, querySvc, authenticator, log)
 
 	srv := &http.Server{
 		Addr:         cfg.HTTPAddr,
@@ -61,7 +66,10 @@ func main() {
 	}
 
 	go func() {
-		log.Info("ingest-api started", "addr", cfg.HTTPAddr)
+		log.Info("ingest-api started",
+			"addr", cfg.HTTPAddr,
+			"auth_mode", cfg.Auth.Mode,
+		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("server error", "error", err)
 			os.Exit(1)
@@ -78,4 +86,21 @@ func main() {
 		log.Error("graceful shutdown failed", "error", err)
 	}
 	log.Info("ingest-api stopped")
+}
+
+// buildAuthenticator selects and constructs the configured Authenticator.
+// Defaults to simple if mode is unrecognised.
+func buildAuthenticator(cfg config.AuthConfig, log *slog.Logger) infraauth.Authenticator {
+	switch cfg.Mode {
+	case "jwt":
+		if cfg.JWTSecret == "" {
+			log.Error("AUTH_JWT_SECRET must be set when AUTH_MODE=jwt")
+			os.Exit(1)
+		}
+		log.Info("auth mode: jwt (multi-tenant)")
+		return jwt.New(cfg.JWTSecret)
+	default:
+		log.Info("auth mode: simple (api-key)", "mode", cfg.Mode)
+		return simple.New(cfg.APIKey)
+	}
 }

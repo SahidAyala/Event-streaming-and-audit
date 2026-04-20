@@ -18,10 +18,12 @@ import (
 // mapping defines the Elasticsearch index schema for events.
 // keyword fields enable exact-match filtering and aggregations;
 // occurred_at is a date so range queries and sorting work correctly.
+// tenant_id is keyword for exact-match tenant isolation queries.
 const mapping = `{
   "mappings": {
     "properties": {
       "id":          { "type": "keyword" },
+      "tenant_id":   { "type": "keyword" },
       "stream_id":   { "type": "keyword" },
       "type":        { "type": "keyword" },
       "source":      { "type": "keyword" },
@@ -123,13 +125,21 @@ func (i *Indexer) Index(ctx context.Context, e *event.Event) error {
 }
 
 // Search queries events for a stream from Elasticsearch.
-// Results are sorted by version ASC, then id ASC for deterministic
-// tiebreaking. Returns the matching events and the total hit count
-// (useful for pagination metadata).
+// Results are scoped to q.TenantID, sorted by version ASC then id ASC for
+// deterministic ordering. Returns the matching events and total hit count.
 func (i *Indexer) Search(ctx context.Context, q event.SearchQuery) ([]*event.Event, int64, error) {
+	filters := []map[string]any{
+		{"term": map[string]any{"stream_id": q.StreamID}},
+	}
+	if q.TenantID != "" {
+		filters = append(filters, map[string]any{
+			"term": map[string]any{"tenant_id": q.TenantID},
+		})
+	}
+
 	body := map[string]any{
 		"query": map[string]any{
-			"term": map[string]any{"stream_id.keyword": q.StreamID},
+			"bool": map[string]any{"filter": filters},
 		},
 		"sort": []map[string]any{
 			{"version": map[string]string{"order": "asc"}},
