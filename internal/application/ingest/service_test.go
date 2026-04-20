@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	appauth "github.com/SheykoWk/event-streaming-and-audit/internal/application/auth"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/domain/event"
 )
 
@@ -143,6 +144,15 @@ func newSvc(store *mockStore, pub *mockPublisher) *Service {
 	return NewService(store, pub, discardLogger())
 }
 
+// authedCtx returns a context carrying a test Identity with the given tenantID.
+func authedCtx(tenantID string) context.Context {
+	return appauth.WithIdentity(context.Background(), appauth.Identity{
+		SubjectID: "test-subject",
+		TenantID:  tenantID,
+		Roles:     []string{"writer"},
+	})
+}
+
 // ---------------------------------------------------------------------------
 // ingest.Service — behavior tests
 // ---------------------------------------------------------------------------
@@ -152,7 +162,7 @@ func TestIngest_EventPersistedAndPublished(t *testing.T) {
 	pub := &mockPublisher{}
 	svc := newSvc(store, pub)
 
-	e, err := svc.Ingest(context.Background(), Command{
+	e, err := svc.Ingest(authedCtx("tenant-a"), Command{
 		StreamID: "order:1",
 		Type:     "order.created",
 		Source:   "orders-svc",
@@ -171,6 +181,39 @@ func TestIngest_EventPersistedAndPublished(t *testing.T) {
 	if e.Version != 1 {
 		t.Errorf("first event in stream must have version 1, got %d", e.Version)
 	}
+	if e.TenantID != "tenant-a" {
+		t.Errorf("event TenantID = %q, want %q", e.TenantID, "tenant-a")
+	}
+}
+
+func TestIngest_TenantIDSetFromIdentity(t *testing.T) {
+	// TenantID on the stored event must come from the Identity in context,
+	// not from any caller-supplied field.
+	store := &mockStore{}
+	svc := newSvc(store, &mockPublisher{})
+
+	e, err := svc.Ingest(authedCtx("acme-corp"), Command{
+		StreamID: "order:1", Type: "order.created", Source: "svc",
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if e.TenantID != "acme-corp" {
+		t.Errorf("TenantID = %q, want %q", e.TenantID, "acme-corp")
+	}
+}
+
+func TestIngest_RejectsRequestWithNoIdentity(t *testing.T) {
+	svc := newSvc(&mockStore{}, &mockPublisher{})
+
+	_, err := svc.Ingest(context.Background(), Command{
+		StreamID: "order:1", Type: "order.created", Source: "svc",
+	})
+
+	if err == nil {
+		t.Fatal("Ingest without Identity in context must return an error")
+	}
 }
 
 func TestIngest_VersionsAreMonotonic(t *testing.T) {
@@ -179,7 +222,7 @@ func TestIngest_VersionsAreMonotonic(t *testing.T) {
 
 	var versions []int64
 	for i := 0; i < 3; i++ {
-		e, err := svc.Ingest(context.Background(), Command{
+		e, err := svc.Ingest(authedCtx("tenant-a"), Command{
 			StreamID: "order:1",
 			Type:     "order.updated",
 			Source:   "orders-svc",
@@ -203,8 +246,8 @@ func TestIngest_MultipleStreamsHaveIndependentVersions(t *testing.T) {
 	store := &mockStore{}
 	svc := newSvc(store, &mockPublisher{})
 
-	ingest := func(streamID string) *event.Event {
-		e, err := svc.Ingest(context.Background(), Command{
+	ingestFn := func(streamID string) *event.Event {
+		e, err := svc.Ingest(authedCtx("tenant-a"), Command{
 			StreamID: streamID, Type: "evt", Source: "svc",
 		})
 		if err != nil {
@@ -213,10 +256,10 @@ func TestIngest_MultipleStreamsHaveIndependentVersions(t *testing.T) {
 		return e
 	}
 
-	a1 := ingest("stream:A")
-	ingest("stream:B")
-	a2 := ingest("stream:A")
-	b2 := ingest("stream:B")
+	a1 := ingestFn("stream:A")
+	ingestFn("stream:B")
+	a2 := ingestFn("stream:A")
+	b2 := ingestFn("stream:B")
 
 	if a1.Version != 1 || a2.Version != 2 {
 		t.Errorf("stream:A versions must be [1,2], got [%d,%d]", a1.Version, a2.Version)
@@ -234,7 +277,7 @@ func TestIngest_KafkaFailureDoesNotRollbackPersistence(t *testing.T) {
 	pub := &mockPublisher{failNext: true}
 	svc := newSvc(store, pub)
 
-	e, err := svc.Ingest(context.Background(), Command{
+	e, err := svc.Ingest(authedCtx("tenant-a"), Command{
 		StreamID: "order:1", Type: "order.created", Source: "svc",
 	})
 
@@ -270,7 +313,7 @@ func TestIngest_EmptyRequiredFields(t *testing.T) {
 			pub := &mockPublisher{}
 			svc = newSvc(store, pub)
 
-			_, err := svc.Ingest(context.Background(), tc.cmd)
+			_, err := svc.Ingest(authedCtx("tenant-a"), tc.cmd)
 
 			if err == nil {
 				t.Fatal("expected validation error, got nil")
@@ -292,7 +335,7 @@ func TestIngest_StoreFailurePreventsPublish(t *testing.T) {
 	pub := &mockPublisher{}
 	svc := newSvc(store, pub)
 
-	_, err := svc.Ingest(context.Background(), Command{
+	_, err := svc.Ingest(authedCtx("tenant-a"), Command{
 		StreamID: "order:1", Type: "order.created", Source: "svc",
 	})
 

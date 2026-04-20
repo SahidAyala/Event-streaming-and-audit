@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	appauth "github.com/SheykoWk/event-streaming-and-audit/internal/application/auth"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/domain/event"
 )
 
@@ -103,6 +104,14 @@ func makeEvent(streamID string, version int64) *event.Event {
 	}
 }
 
+// authedCtx returns a context carrying a test Identity with the given tenantID.
+func authedCtx(tenantID string) context.Context {
+	return appauth.WithIdentity(context.Background(), appauth.Identity{
+		SubjectID: "test-subject",
+		TenantID:  tenantID,
+	})
+}
+
 // ---------------------------------------------------------------------------
 // validateContiguous — pure function, tested directly.
 //
@@ -187,7 +196,7 @@ func TestValidateContiguous_DuplicateVersionIsAGap(t *testing.T) {
 func TestReplayService_EmptyStream(t *testing.T) {
 	svc := NewService(&mockStore{}, discardLogger())
 
-	result, err := svc.Replay(context.Background(), Command{StreamID: "order:1", FromVersion: 0})
+	result, err := svc.Replay(authedCtx("tenant-a"), Command{StreamID: "order:1", FromVersion: 0})
 
 	if err != nil {
 		t.Fatalf("empty stream must not error, got: %v", err)
@@ -205,7 +214,7 @@ func TestReplayService_ReturnsAllEventsOrdered(t *testing.T) {
 	}
 	svc := NewService(store, discardLogger())
 
-	result, err := svc.Replay(context.Background(), Command{StreamID: "order:1", FromVersion: 0})
+	result, err := svc.Replay(authedCtx("tenant-a"), Command{StreamID: "order:1", FromVersion: 0})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -227,7 +236,7 @@ func TestReplayService_FromVersionIsInclusive(t *testing.T) {
 	}
 	svc := NewService(store, discardLogger())
 
-	result, err := svc.Replay(context.Background(), Command{StreamID: "order:1", FromVersion: 3})
+	result, err := svc.Replay(authedCtx("tenant-a"), Command{StreamID: "order:1", FromVersion: 3})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -249,7 +258,7 @@ func TestReplayService_FromVersionBeyondStreamIsEmpty(t *testing.T) {
 	svc := NewService(store, discardLogger())
 
 	// Requesting from version 99 on a stream that only has [1,2] returns empty — not an error.
-	result, err := svc.Replay(context.Background(), Command{StreamID: "order:1", FromVersion: 99})
+	result, err := svc.Replay(authedCtx("tenant-a"), Command{StreamID: "order:1", FromVersion: 99})
 
 	if err != nil {
 		t.Fatalf("from_version beyond stream end must not error, got: %v", err)
@@ -270,7 +279,7 @@ func TestReplayService_GapCausesError(t *testing.T) {
 	)
 	svc := NewService(store, discardLogger())
 
-	_, err := svc.Replay(context.Background(), Command{StreamID: "order:1", FromVersion: 0})
+	_, err := svc.Replay(authedCtx("tenant-a"), Command{StreamID: "order:1", FromVersion: 0})
 
 	if err == nil {
 		t.Fatal("a version gap must cause Replay to return an error")
@@ -289,7 +298,7 @@ func TestReplayService_DoesNotCrossStreamBoundaries(t *testing.T) {
 	store.inject(makeEvent("stream:B", 2))
 	svc := NewService(store, discardLogger())
 
-	result, err := svc.Replay(context.Background(), Command{StreamID: "stream:A", FromVersion: 0})
+	result, err := svc.Replay(authedCtx("tenant-a"), Command{StreamID: "stream:A", FromVersion: 0})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -307,7 +316,7 @@ func TestReplayService_DoesNotCrossStreamBoundaries(t *testing.T) {
 func TestReplayService_RejectsEmptyStreamID(t *testing.T) {
 	svc := NewService(&mockStore{}, discardLogger())
 
-	_, err := svc.Replay(context.Background(), Command{StreamID: "", FromVersion: 0})
+	_, err := svc.Replay(authedCtx("tenant-a"), Command{StreamID: "", FromVersion: 0})
 
 	if err == nil {
 		t.Fatal("empty stream_id must return an error")
@@ -317,7 +326,7 @@ func TestReplayService_RejectsEmptyStreamID(t *testing.T) {
 func TestReplayService_RejectsNegativeFromVersion(t *testing.T) {
 	svc := NewService(&mockStore{}, discardLogger())
 
-	_, err := svc.Replay(context.Background(), Command{StreamID: "order:1", FromVersion: -1})
+	_, err := svc.Replay(authedCtx("tenant-a"), Command{StreamID: "order:1", FromVersion: -1})
 
 	if err == nil {
 		t.Fatal("negative from_version must return an error")
@@ -328,9 +337,19 @@ func TestReplayService_PropagatesStoreError(t *testing.T) {
 	store := &mockStore{err: errors.New("connection pool exhausted")}
 	svc := NewService(store, discardLogger())
 
-	_, err := svc.Replay(context.Background(), Command{StreamID: "order:1", FromVersion: 0})
+	_, err := svc.Replay(authedCtx("tenant-a"), Command{StreamID: "order:1", FromVersion: 0})
 
 	if err == nil {
 		t.Fatal("store error must be propagated by the service")
+	}
+}
+
+func TestReplayService_RejectsRequestWithNoIdentity(t *testing.T) {
+	svc := NewService(&mockStore{}, discardLogger())
+
+	_, err := svc.Replay(context.Background(), Command{StreamID: "order:1", FromVersion: 0})
+
+	if err == nil {
+		t.Fatal("Replay without Identity in context must return an error")
 	}
 }
