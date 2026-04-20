@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	appauth "github.com/SheykoWk/event-streaming-and-audit/internal/application/auth"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/domain/event"
 )
 
@@ -27,9 +28,15 @@ func NewService(store event.Store, log *slog.Logger) *Service {
 
 // Replay reads events for a stream starting at fromVersion, validates that the
 // returned sequence is contiguous (no version gaps), and returns the ordered slice.
+// Requires an Identity in ctx for tenant scoping — returns an error if absent.
 // A detected gap is a data-integrity violation and causes the replay to fail —
 // returning partial data would produce a corrupt audit trail.
 func (s *Service) Replay(ctx context.Context, cmd Command) ([]*event.Event, error) {
+	identity, ok := appauth.IdentityFromContext(ctx)
+	if !ok || identity.TenantID == "" {
+		return nil, fmt.Errorf("unauthenticated: identity with tenant_id is required")
+	}
+
 	if cmd.StreamID == "" {
 		return nil, fmt.Errorf("stream_id is required")
 	}
@@ -45,6 +52,7 @@ func (s *Service) Replay(ctx context.Context, cmd Command) ([]*event.Event, erro
 	if err := validateContiguous(events); err != nil {
 		s.log.Error("version gap detected during replay",
 			"stream_id", cmd.StreamID,
+			"tenant_id", identity.TenantID,
 			"from_version", cmd.FromVersion,
 			"event_count", len(events),
 			"error", err,
@@ -54,6 +62,7 @@ func (s *Service) Replay(ctx context.Context, cmd Command) ([]*event.Event, erro
 
 	s.log.Info("replay completed",
 		"stream_id", cmd.StreamID,
+		"tenant_id", identity.TenantID,
 		"from_version", cmd.FromVersion,
 		"event_count", len(events),
 	)

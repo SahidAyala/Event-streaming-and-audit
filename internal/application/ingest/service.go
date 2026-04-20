@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	appauth "github.com/SheykoWk/event-streaming-and-audit/internal/application/auth"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/domain/event"
 )
 
@@ -30,14 +31,21 @@ func NewService(store event.Store, publisher event.Publisher, log *slog.Logger) 
 }
 
 // Ingest appends the event to the store and publishes it to Kafka.
+// Requires an Identity in ctx for tenant scoping — returns an error if absent.
 // A Kafka publish failure is logged but does not fail the request —
 // the event is already durable in PostgreSQL.
 func (s *Service) Ingest(ctx context.Context, cmd Command) (*event.Event, error) {
+	identity, ok := appauth.IdentityFromContext(ctx)
+	if !ok || identity.TenantID == "" {
+		return nil, fmt.Errorf("unauthenticated: identity with tenant_id is required")
+	}
+
 	if cmd.StreamID == "" || cmd.Type == "" || cmd.Source == "" {
 		return nil, fmt.Errorf("stream_id, type, and source are required")
 	}
 
 	e := event.New(cmd.StreamID, cmd.Type, cmd.Source, cmd.Payload, cmd.Metadata)
+	e.TenantID = identity.TenantID
 
 	if err := s.store.Append(ctx, e); err != nil {
 		return nil, fmt.Errorf("append to store: %w", err)
@@ -47,6 +55,7 @@ func (s *Service) Ingest(ctx context.Context, cmd Command) (*event.Event, error)
 		s.log.Warn("failed to publish event to kafka",
 			"event_id", e.ID,
 			"stream_id", e.StreamID,
+			"tenant_id", e.TenantID,
 			"error", err,
 		)
 	}
@@ -56,6 +65,7 @@ func (s *Service) Ingest(ctx context.Context, cmd Command) (*event.Event, error)
 		"stream_id", e.StreamID,
 		"type", e.Type,
 		"version", e.Version,
+		"tenant_id", e.TenantID,
 	)
 	return e, nil
 }
