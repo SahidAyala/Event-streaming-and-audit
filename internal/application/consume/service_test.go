@@ -16,13 +16,6 @@ import (
 
 // ---------------------------------------------------------------------------
 // mockSubscriber — synchronous delivery of a predefined event list.
-//
-// Real Kafka blocks indefinitely and requires a running broker. This mock
-// delivers all events in order and returns nil, simulating a Kafka run loop
-// that naturally terminates after processing its batch.
-//
-// This design lets Run() be called synchronously in tests without goroutines,
-// channels, or timeouts.
 // ---------------------------------------------------------------------------
 
 type mockSubscriber struct {
@@ -32,8 +25,6 @@ type mockSubscriber struct {
 func (m *mockSubscriber) Run(ctx context.Context, handle func(context.Context, *event.Event) error) error {
 	for _, e := range m.events {
 		if err := handle(ctx, e); err != nil {
-			// Mirror real Kafka behaviour: if the handler errors,
-			// the subscriber surfaces it (and would not commit the offset).
 			return err
 		}
 	}
@@ -43,16 +34,14 @@ func (m *mockSubscriber) Run(ctx context.Context, handle func(context.Context, *
 // ---------------------------------------------------------------------------
 // mockIndexer — stateful in-memory event.Indexer.
 //
-// Stores events keyed by UUID, mirroring Elasticsearch's idempotent
-// document upsert (doc_id = event.ID). Indexing the same event twice
-// results in one entry — the second write overwrites the first.
+// Stores events keyed by UUID, mirroring Elasticsearch's idempotent upsert.
 // ---------------------------------------------------------------------------
 
 type mockIndexer struct {
 	mu      sync.Mutex
 	indexed map[uuid.UUID]*event.Event
 	calls   int
-	failFor uuid.UUID // if set, Index returns error for this specific event ID
+	failFor uuid.UUID // Index returns error when called with this ID
 }
 
 func newMockIndexer() *mockIndexer {
@@ -87,6 +76,40 @@ func (m *mockIndexer) size() int {
 }
 
 // ---------------------------------------------------------------------------
+// mockDLQPublisher — stateful in-memory DLQPublisher.
+//
+// Accumulates DLQMessages so tests can assert on what was routed to DLQ.
+// failNext simulates DLQ unavailability without scripting per-call responses.
+// ---------------------------------------------------------------------------
+
+type mockDLQPublisher struct {
+	mu       sync.Mutex
+	messages []DLQMessage
+	failNext bool
+}
+
+func (m *mockDLQPublisher) Publish(_ context.Context, msg DLQMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failNext {
+		m.failNext = false
+		return errors.New("kafka dlq broker unreachable")
+	}
+	m.messages = append(m.messages, msg)
+	return nil
+}
+
+func (m *mockDLQPublisher) Close() error { return nil }
+
+func (m *mockDLQPublisher) received() []DLQMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]DLQMessage, len(m.messages))
+	copy(out, m.messages)
+	return out
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
@@ -105,15 +128,19 @@ func makeEvent(streamID string, version int64) *event.Event {
 	}
 }
 
+func newSvc(sub *mockSubscriber, idx *mockIndexer, dlq *mockDLQPublisher) *Service {
+	return NewService(sub, idx, dlq, discardLogger())
+}
+
 // ---------------------------------------------------------------------------
-// consume.Service — behavior tests
+// Happy-path tests — unchanged behaviour
 // ---------------------------------------------------------------------------
 
 func TestConsume_EventReachesIndexer(t *testing.T) {
 	e := makeEvent("order:1", 1)
 	sub := &mockSubscriber{events: []*event.Event{e}}
 	idx := newMockIndexer()
-	svc := NewService(sub, idx, discardLogger())
+	svc := newSvc(sub, idx, &mockDLQPublisher{})
 
 	if err := svc.Run(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -123,7 +150,6 @@ func TestConsume_EventReachesIndexer(t *testing.T) {
 	if !ok {
 		t.Fatal("event must be present in the indexer after Run")
 	}
-	// The indexed event must be the same event — no mutation in transit.
 	if indexed.StreamID != e.StreamID || indexed.Version != e.Version {
 		t.Errorf("indexed event does not match original: got stream=%s v=%d, want stream=%s v=%d",
 			indexed.StreamID, indexed.Version, e.StreamID, e.Version)
@@ -138,7 +164,7 @@ func TestConsume_AllEventsFromSubscriberAreIndexed(t *testing.T) {
 	}
 	sub := &mockSubscriber{events: events}
 	idx := newMockIndexer()
-	svc := NewService(sub, idx, discardLogger())
+	svc := newSvc(sub, idx, &mockDLQPublisher{})
 
 	if err := svc.Run(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -154,58 +180,136 @@ func TestConsume_AllEventsFromSubscriberAreIndexed(t *testing.T) {
 }
 
 func TestConsume_IdempotentIndexing(t *testing.T) {
-	// Kafka at-least-once delivery means the same event can arrive twice.
-	// The service must pass it to the indexer both times — deduplication
-	// is the indexer's responsibility (ES upsert by doc_id).
-	// After two deliveries, the index must contain exactly one entry.
 	e := makeEvent("order:1", 1)
-	sub := &mockSubscriber{events: []*event.Event{e, e}} // same event twice
+	sub := &mockSubscriber{events: []*event.Event{e, e}}
 	idx := newMockIndexer()
-	svc := NewService(sub, idx, discardLogger())
+	svc := newSvc(sub, idx, &mockDLQPublisher{})
 
 	if err := svc.Run(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if idx.calls != 2 {
-		t.Errorf("indexer must be called once per delivery: expected 2 calls, got %d", idx.calls)
+		t.Errorf("indexer must be called once per delivery: expected 2, got %d", idx.calls)
 	}
 	if idx.size() != 1 {
-		t.Errorf("idempotent indexer must hold exactly 1 entry after 2 identical deliveries, got %d", idx.size())
+		t.Errorf("idempotent indexer must hold 1 entry after 2 identical deliveries, got %d", idx.size())
 	}
 }
 
-func TestConsume_IndexerErrorPropagates(t *testing.T) {
-	// If the indexer returns an error, Run must surface it.
-	// In production this prevents the Kafka offset from being committed,
-	// ensuring the event will be redelivered. Swallowing the error here
-	// would silently lose events from the index.
+// ---------------------------------------------------------------------------
+// DLQ behaviour tests
+// ---------------------------------------------------------------------------
+
+func TestConsume_IndexerErrorSentToDLQ(t *testing.T) {
+	// When the indexer fails, the event must appear in the DLQ —
+	// not be silently discarded, not trigger a retry.
 	e := makeEvent("order:1", 1)
-	sub := &mockSubscriber{events: []*event.Event{e}}
 	idx := newMockIndexer()
 	idx.failFor = e.ID
-	svc := NewService(sub, idx, discardLogger())
+	dlq := &mockDLQPublisher{}
+	svc := newSvc(&mockSubscriber{events: []*event.Event{e}}, idx, dlq)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("indexer failure must not cause Run to return an error, got: %v", err)
+	}
+
+	msgs := dlq.received()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 DLQ message, got %d", len(msgs))
+	}
+}
+
+func TestConsume_DLQMessageContainsOriginalEvent(t *testing.T) {
+	// The DLQ message must carry the full original event so it can be reprocessed.
+	// Reason must be non-empty so on-call can diagnose without reading logs.
+	e := makeEvent("order:1", 42)
+	idx := newMockIndexer()
+	idx.failFor = e.ID
+	dlq := &mockDLQPublisher{}
+	svc := newSvc(&mockSubscriber{events: []*event.Event{e}}, idx, dlq)
+
+	svc.Run(context.Background()) //nolint:errcheck
+
+	msgs := dlq.received()
+	if len(msgs) == 0 {
+		t.Fatal("no DLQ message received")
+	}
+	msg := msgs[0]
+
+	if msg.Event == nil {
+		t.Fatal("DLQ message must contain the original event")
+	}
+	if msg.Event.ID != e.ID {
+		t.Errorf("DLQ event ID = %s, want %s", msg.Event.ID, e.ID)
+	}
+	if msg.Event.Version != e.Version {
+		t.Errorf("DLQ event version = %d, want %d", msg.Event.Version, e.Version)
+	}
+	if msg.Reason == "" {
+		t.Error("DLQ message Reason must not be empty")
+	}
+	if msg.FailedAt.IsZero() {
+		t.Error("DLQ message FailedAt must be set")
+	}
+}
+
+func TestConsume_DLQPublishFailureDoesNotCrash(t *testing.T) {
+	// If both the indexer and the DLQ publisher fail, the service must
+	// continue — it logs the double failure and commits the offset.
+	// The event is recoverable from PostgreSQL via the replay engine.
+	e := makeEvent("order:1", 1)
+	idx := newMockIndexer()
+	idx.failFor = e.ID
+	dlq := &mockDLQPublisher{failNext: true}
+	svc := newSvc(&mockSubscriber{events: []*event.Event{e}}, idx, dlq)
 
 	err := svc.Run(context.Background())
 
-	if err == nil {
-		t.Fatal("indexer error must be propagated by Run — not swallowed")
+	if err != nil {
+		t.Fatalf("double failure (index + DLQ) must not crash Run, got: %v", err)
 	}
 }
 
-func TestConsume_IndexerErrorStopsProcessing(t *testing.T) {
-	// When the indexer fails for event[0], event[1] must NOT be processed.
-	// The subscriber returns the first error and stops — mirroring how
-	// Kafka would stop consuming further messages until the error is resolved.
-	first := makeEvent("order:1", 1)
-	second := makeEvent("order:1", 2)
-	sub := &mockSubscriber{events: []*event.Event{first, second}}
+func TestConsume_ConsumerContinuesAfterDLQ(t *testing.T) {
+	// After routing one event to DLQ the consumer must continue processing
+	// the remaining events — a single failure must not halt the pipeline.
+	failing := makeEvent("order:1", 1)
+	healthy := makeEvent("order:1", 2)
 	idx := newMockIndexer()
-	idx.failFor = first.ID
-	svc := NewService(sub, idx, discardLogger())
+	idx.failFor = failing.ID
+	dlq := &mockDLQPublisher{}
+	svc := newSvc(&mockSubscriber{events: []*event.Event{failing, healthy}}, idx, dlq)
 
-	svc.Run(context.Background()) //nolint:errcheck — error presence tested above
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	if _, ok := idx.get(second.ID); ok {
-		t.Error("second event must not be indexed after first event fails")
+	// failing event: in DLQ, not in index
+	if _, ok := idx.get(failing.ID); ok {
+		t.Error("failing event must not be in the index")
+	}
+	if len(dlq.received()) != 1 {
+		t.Errorf("expected 1 DLQ message, got %d", len(dlq.received()))
+	}
+
+	// healthy event: indexed successfully
+	if _, ok := idx.get(healthy.ID); !ok {
+		t.Error("healthy event must be indexed after the failing one was routed to DLQ")
+	}
+}
+
+func TestConsume_SuccessfulEventsNotSentToDLQ(t *testing.T) {
+	// Events that index successfully must never appear in the DLQ.
+	events := []*event.Event{
+		makeEvent("order:1", 1),
+		makeEvent("order:1", 2),
+	}
+	dlq := &mockDLQPublisher{}
+	svc := newSvc(&mockSubscriber{events: events}, newMockIndexer(), dlq)
+
+	svc.Run(context.Background()) //nolint:errcheck
+
+	if len(dlq.received()) != 0 {
+		t.Errorf("DLQ must be empty when all events index successfully, got %d messages", len(dlq.received()))
 	}
 }
