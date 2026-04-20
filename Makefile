@@ -15,9 +15,14 @@ proto:
 
 build:
 	go build -o bin/ingest-api ./cmd/ingest-api
+	go build -o bin/consumer-service ./cmd/consumer-service
+	go build -o bin/replay-service ./cmd/replay-service
 
 run:
 	go run ./cmd/ingest-api
+
+run-replay:
+	go run ./cmd/replay-service
 
 tidy:
 	go mod tidy
