@@ -1,3 +1,30 @@
+// Package main is the entrypoint for the ingest-api service.
+//
+// @title          Event Streaming and Audit API
+// @version        1.0
+// @description    HTTP API for ingesting and querying events in the Event Streaming & Audit Platform.
+// @description
+// @description    ## Authentication
+// @description    All /events endpoints require authentication. /health and /swagger are public.
+// @description    Set AUTH_MODE=simple (default) to use X-API-Key, or AUTH_MODE=jwt for Bearer tokens.
+// @description
+// @description    ## Data consistency
+// @description    Write path: PostgreSQL (source of truth) → Kafka → Elasticsearch (read model).
+// @description    GET /events/{streamID} is served from Elasticsearch and is eventually consistent.
+//
+// @host        localhost:8080
+// @BasePath    /
+// @schemes     http https
+//
+// @securityDefinitions.apikey  ApiKeyAuth
+// @in                          header
+// @name                        X-API-Key
+// @description                 Static API key. Default value for local dev: dev-api-key. Configured via AUTH_API_KEY env var.
+//
+// @securityDefinitions.apikey  BearerAuth
+// @in                          header
+// @name                        Authorization
+// @description                 JWT Bearer token. Format: "Bearer {token}". Enable with AUTH_MODE=jwt and AUTH_JWT_SECRET env var.
 package main
 
 import (
@@ -10,16 +37,19 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/SheykoWk/event-streaming-and-audit/docs"
+
+	appauth "github.com/SheykoWk/event-streaming-and-audit/internal/application/auth"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/application/ingest"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/application/query"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/config"
+	infraauth "github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/auth"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/auth/jwt"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/auth/simple"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/elasticsearch"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/httpserver"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/kafka"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/postgres"
-	infraauth "github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/auth"
 )
 
 func main() {
@@ -54,8 +84,9 @@ func main() {
 	querySvc := query.NewService(esIndexer, log)
 
 	authenticator := buildAuthenticator(cfg.Auth, log)
+	issuer := buildIssuer(cfg.Auth, log)
 
-	router := httpserver.NewRouter(ingestSvc, querySvc, authenticator, log)
+	router := httpserver.NewRouter(ingestSvc, querySvc, authenticator, issuer, cfg.Auth.AdminKey, log)
 
 	srv := &http.Server{
 		Addr:         cfg.HTTPAddr,
@@ -69,6 +100,7 @@ func main() {
 		log.Info("ingest-api started",
 			"addr", cfg.HTTPAddr,
 			"auth_mode", cfg.Auth.Mode,
+			"swagger_ui", cfg.HTTPAddr+"/swagger/index.html",
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("server error", "error", err)
@@ -86,6 +118,17 @@ func main() {
 		log.Error("graceful shutdown failed", "error", err)
 	}
 	log.Info("ingest-api stopped")
+}
+
+// buildIssuer constructs a JWT Issuer when AUTH_JWT_SECRET is set.
+// Returns nil otherwise — the /auth/issue endpoint will respond with 501.
+func buildIssuer(cfg config.AuthConfig, log *slog.Logger) appauth.Issuer {
+	if cfg.JWTSecret == "" {
+		log.Info("token issuance disabled — set AUTH_JWT_SECRET to enable POST /auth/issue")
+		return nil
+	}
+	log.Info("token issuance enabled (JWT/HMAC)")
+	return jwt.New(cfg.JWTSecret)
 }
 
 // buildAuthenticator selects and constructs the configured Authenticator.

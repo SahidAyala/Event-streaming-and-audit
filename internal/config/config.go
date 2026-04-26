@@ -21,6 +21,9 @@ type AuthConfig struct {
 	Mode      string // "simple" | "jwt"
 	APIKey    string
 	JWTSecret string
+	// AdminKey protects the tenant provisioning endpoint (POST /tenants).
+	// Keep this secret and separate from regular API keys.
+	AdminKey string
 }
 
 type PostgresConfig struct {
@@ -44,7 +47,7 @@ func Load() *Config {
 		HTTPAddr: getEnv("HTTP_ADDR", ":8080"),
 		GRPCAddr: getEnv("GRPC_ADDR", ":50051"),
 		Postgres: PostgresConfig{
-			DSN: getEnv("POSTGRES_DSN", "postgres://events:events@localhost:5432/events?sslmode=disable"),
+			DSN: getEnv("POSTGRES_DSN", "postgres://events:events@localhost:5433/events?sslmode=disable"),
 		},
 		Kafka: KafkaConfig{
 			// 9094 = EXTERNAL listener exposed by docker-compose for host access
@@ -61,6 +64,7 @@ func Load() *Config {
 			Mode:      getEnv("AUTH_MODE", "simple"),
 			APIKey:    getEnv("AUTH_API_KEY", "dev-api-key"),
 			JWTSecret: getEnv("AUTH_JWT_SECRET", ""),
+			AdminKey:  getEnv("ADMIN_KEY", "admin-secret"),
 		},
 	}
 }
