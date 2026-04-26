@@ -1,0 +1,388 @@
+openapi: 3.0.3
+
+info:
+  title: Event Streaming & Audit Platform — Ingest API
+  description: |
+    HTTP API for ingesting and querying events in the Event Streaming & Audit Platform.
+
+    ## Authentication
+
+    All `/events` endpoints require authentication. `/health` is public.
+
+    Two modes are supported — configure via `AUTH_MODE` environment variable:
+
+    | Mode | Header | Default credential |
+    |---|---|---|
+    | `simple` (default) | `X-API-Key: <key>` | `dev-api-key` |
+    | `jwt` | `Authorization: Bearer <token>` | HMAC-signed JWT with `sub` and `tenant_id` claims |
+
+    ## Data consistency
+
+    Events are written to **PostgreSQL** (source of truth) first, then published to Kafka
+    asynchronously. The read model (`GET /events/{streamID}`) is served from **Elasticsearch**
+    and is **eventually consistent** — recently ingested events may not be visible immediately.
+    Response headers communicate this explicitly:
+
+    - `X-Read-Model: elasticsearch`
+    - `X-Data-Consistency: eventual`
+
+  version: 1.0.0
+  contact:
+    name: SheykoWk
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: events
+    description: Event ingestion and querying
+  - name: health
+    description: Service health
+
+security:
+  - apiKey: []
+
+paths:
+
+  /health:
+    get:
+      tags: [health]
+      summary: Health check
+      description: Returns `ok` if the service is running. No authentication required.
+      security: []
+      operationId: getHealth
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /events:
+    post:
+      tags: [events]
+      summary: Ingest an event
+      description: |
+        Appends an event to the specified stream.
+
+        The event is persisted in PostgreSQL synchronously, then published to Kafka
+        best-effort. A Kafka failure does **not** fail this request — the event is
+        already durable.
+
+        `version` is assigned by the store (MAX+1 per stream) and returned in the response.
+        The caller must not supply a version.
+      operationId: ingestEvent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestRequest'
+            examples:
+              order_created:
+                summary: Order created event
+                value:
+                  stream_id: "order:1"
+                  type: "order.created"
+                  source: "orders-svc"
+                  payload:
+                    amount: 99
+                    currency: "USD"
+                  metadata:
+                    region: "us-east-1"
+      responses:
+        '201':
+          description: Event persisted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Event'
+              example:
+                id: "01906c2e-4a3b-7000-8000-abc123def456"
+                tenant_id: "default"
+                stream_id: "order:1"
+                type: "order.created"
+                source: "orders-svc"
+                version: 1
+                occurred_at: "2026-04-21T10:00:00Z"
+                payload:
+                  amount: 99
+                  currency: "USD"
+                metadata:
+                  region: "us-east-1"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          description: Validation error (missing required fields)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "stream_id, type, and source are required"
+
+  /events/{streamID}:
+    get:
+      tags: [events]
+      summary: Query events by stream
+      description: |
+        Returns a paginated list of events for a stream from the Elasticsearch read model.
+
+        Results are **eventually consistent** with the PostgreSQL event store.
+        Events are sorted by `version ASC` for deterministic ordering.
+      operationId: getEventsByStream
+      parameters:
+        - name: streamID
+          in: path
+          required: true
+          description: The stream identifier (e.g. `order:1`, `user:42`)
+          schema:
+            type: string
+          example: "order:1"
+        - name: limit
+          in: query
+          required: false
+          description: Number of events to return (default 20, max 100)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          example: 20
+        - name: offset
+          in: query
+          required: false
+          description: Number of events to skip for pagination
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          example: 0
+      responses:
+        '200':
+          description: Paginated list of events
+          headers:
+            X-Read-Model:
+              schema:
+                type: string
+                example: elasticsearch
+              description: Data source for this response
+            X-Data-Consistency:
+              schema:
+                type: string
+                example: eventual
+              description: Consistency guarantee — recently ingested events may not appear
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryResult'
+              example:
+                stream_id: "order:1"
+                events:
+                  - id: "01906c2e-4a3b-7000-8000-abc123def456"
+                    tenant_id: "default"
+                    stream_id: "order:1"
+                    type: "order.created"
+                    source: "orders-svc"
+                    version: 1
+                    occurred_at: "2026-04-21T10:00:00Z"
+                    payload:
+                      amount: 99
+                    metadata: {}
+                total: 1
+                limit: 20
+                offset: 0
+                read_model: "elasticsearch"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          description: Read model query failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "query failed"
+
+components:
+
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Static API key. Used when `AUTH_MODE=simple` (default).
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        HMAC-signed JWT. Used when `AUTH_MODE=jwt`.
+        Required claims: `sub` (subject), `tenant_id`.
+        Optional claims: `roles` (array of strings).
+
+  schemas:
+
+    Event:
+      type: object
+      description: An immutable domain event as stored and returned by the platform.
+      required:
+        - id
+        - tenant_id
+        - stream_id
+        - type
+        - source
+        - version
+        - occurred_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Globally unique event identifier (UUID v4)
+          example: "01906c2e-4a3b-7000-8000-abc123def456"
+        tenant_id:
+          type: string
+          description: Tenant that owns this event. Set from the caller's Identity.
+          example: "default"
+        stream_id:
+          type: string
+          description: Logical stream this event belongs to. Ordering is guaranteed per stream.
+          example: "order:1"
+        type:
+          type: string
+          description: Event type in dot-notation.
+          example: "order.created"
+        source:
+          type: string
+          description: Service that produced the event.
+          example: "orders-svc"
+        version:
+          type: integer
+          format: int64
+          description: Monotonically increasing version within the stream, assigned by the store.
+          example: 1
+        occurred_at:
+          type: string
+          format: date-time
+          description: UTC timestamp when the event occurred.
+          example: "2026-04-21T10:00:00Z"
+        payload:
+          type: object
+          description: Arbitrary JSON payload. Schema is application-defined.
+          additionalProperties: true
+          nullable: true
+        metadata:
+          type: object
+          description: Key-value metadata for routing, tracing, or diagnostics.
+          additionalProperties:
+            type: string
+          example:
+            region: "us-east-1"
+            trace_id: "abc-123"
+
+    IngestRequest:
+      type: object
+      required:
+        - stream_id
+        - type
+        - source
+      properties:
+        stream_id:
+          type: string
+          description: Target stream. Created implicitly if it does not exist.
+          example: "order:1"
+        type:
+          type: string
+          description: Event type in dot-notation.
+          example: "order.created"
+        source:
+          type: string
+          description: Originating service name.
+          example: "orders-svc"
+        payload:
+          type: object
+          description: Arbitrary JSON payload.
+          additionalProperties: true
+          nullable: true
+          example:
+            amount: 99
+            currency: "USD"
+        metadata:
+          type: object
+          description: Optional key-value metadata.
+          additionalProperties:
+            type: string
+          nullable: true
+          example:
+            region: "us-east-1"
+
+    QueryResult:
+      type: object
+      description: Paginated response from the Elasticsearch read model.
+      required:
+        - stream_id
+        - events
+        - total
+        - limit
+        - offset
+        - read_model
+      properties:
+        stream_id:
+          type: string
+          example: "order:1"
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+        total:
+          type: integer
+          format: int64
+          description: Total number of matching events (for pagination).
+          example: 42
+        limit:
+          type: integer
+          example: 20
+        offset:
+          type: integer
+          example: 0
+        read_model:
+          type: string
+          description: Data source used for this response.
+          example: "elasticsearch"
+
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          example: "stream_id is required"
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "invalid request body"
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "unauthorized"
