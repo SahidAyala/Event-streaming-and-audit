@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v8"
@@ -53,14 +54,27 @@ func NewIndexer(cfg config.ElasticsearchConfig) (*Indexer, error) {
 
 	idx := &Indexer{client: client, index: cfg.Index}
 
-	initCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := idx.ensureIndex(initCtx); err != nil {
-		return nil, fmt.Errorf("ensure index: %w", err)
+	// Retry with linear backoff — Elasticsearch may still be initialising even
+	// after its healthcheck passes. 10 attempts × up to 10s each = ~90s max.
+	const maxAttempts = 10
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		lastErr = idx.ensureIndex(ctx)
+		cancel()
+		if lastErr == nil {
+			return idx, nil
+		}
+		wait := time.Duration(attempt) * 2 * time.Second
+		slog.Info("elasticsearch not ready, retrying",
+			"attempt", attempt,
+			"max", maxAttempts,
+			"wait", wait.String(),
+			"error", lastErr,
+		)
+		time.Sleep(wait)
 	}
-
-	return idx, nil
+	return nil, fmt.Errorf("ensure index after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // ensureIndex creates the index with the canonical mapping if it does not exist.
