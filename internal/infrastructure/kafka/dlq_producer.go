@@ -28,7 +28,7 @@ func NewDLQProducer(cfg config.KafkaConfig) *DLQProducer {
 	return &DLQProducer{
 		writer: &kafkago.Writer{
 			Addr:         kafkago.TCP(cfg.Brokers...),
-			Topic:        cfg.DLQTopic,
+			Topic:        cfg.DLQTopicName(),
 			RequiredAcks: kafkago.RequireOne,
 			WriteTimeout: 5 * time.Second,
 			Async:        false,

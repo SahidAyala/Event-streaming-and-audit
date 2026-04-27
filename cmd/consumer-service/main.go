@@ -22,6 +22,25 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Ensure all required Kafka topics exist before the consumer starts reading.
+	// This covers the case where auto.create.topics.enable is disabled in the broker.
+	topicManager := kafka.NewTopicManager(cfg.Kafka, log)
+	if err := topicManager.EnsureTopics(ctx, []kafka.TopicSpec{
+		{
+			Name:        cfg.Kafka.Topic,
+			Partitions:  cfg.Kafka.TopicPartitions,
+			Replication: cfg.Kafka.TopicReplication,
+		},
+		{
+			Name:        cfg.Kafka.DLQTopicName(),
+			Partitions:  1, // DLQ is low-volume; single partition is fine
+			Replication: cfg.Kafka.TopicReplication,
+		},
+	}); err != nil {
+		log.Error("failed to ensure kafka topics", "error", err)
+		os.Exit(1)
+	}
+
 	indexer, err := elasticsearch.NewIndexer(cfg.Elasticsearch)
 	if err != nil {
 		log.Error("failed to init elasticsearch indexer", "error", err)
@@ -39,7 +58,7 @@ func main() {
 
 	log.Info("consumer-service started",
 		"topic", cfg.Kafka.Topic,
-		"dlq_topic", cfg.Kafka.DLQTopic,
+		"dlq_topic", cfg.Kafka.DLQTopicName(),
 		"group", cfg.Kafka.GroupID,
 		"brokers", cfg.Kafka.Brokers,
 	)
