@@ -37,46 +37,120 @@ gRPC Replay ─────────────────► PostgreSQL   
 
 ---
 
-## Quick Start
+## Prerequisites
 
-One command starts everything — infrastructure **and** application services:
+- **Go 1.24+**
+- **Docker + Docker Compose**
+- `pg_isready`, `nc`, `curl` available in your PATH (standard on macOS/Linux)
+
+---
+
+## Getting Started
+
+There are two modes depending on what you're doing:
+
+| Mode | Command | Use when |
+|---|---|---|
+| **Dev** | `make dev` | Writing code — fast iteration, `go run` locally |
+| **Full stack** | `make dev-full` | Integration testing, demos, or production-like validation |
+
+---
+
+### Mode 1 — Dev (recommended for day-to-day coding)
+
+Infrastructure runs in Docker. Application services run locally with `go run` so you get fast reloads without rebuilding images.
+
+**Terminal 1 — API:**
 
 ```bash
-git clone <repo> && cd event-streaming-and-audit
-make up
+make dev
 ```
 
-Docker Compose builds the Go binaries, starts all six services in dependency order, and waits for each healthcheck to pass before the next service launches. No race conditions, no manual ordering, no extra terminals.
+This starts Postgres, Kafka, Elasticsearch, and MinIO in Docker, waits for all healthchecks to pass, then launches `ingest-api` locally on `:8080`.
 
-Services and their exposed ports:
+**Terminal 2 — Consumer** (needed for `GET /events` to return results):
+
+```bash
+make dev-consumer
+```
+
+Starts the same infra (no-op if already running) and launches `consumer-service` locally.
+
+**Apply migrations** (first time, or after adding new migration files):
+
+```bash
+make migrate
+```
+
+> Migrations run against `localhost:5433` by default. Only pending files are applied — already-applied ones are skipped.
+
+**Verify:**
+
+```bash
+make test-e2e
+```
+
+---
+
+### Mode 2 — Full stack (production-like)
+
+Everything runs in Docker — infrastructure and application services. No local Go needed after `make dev-full`.
+
+```bash
+make dev-full
+```
+
+Builds the Go binaries inside Docker and starts all services with live logs in the foreground. Services start in dependency order via healthcheck-gated `depends_on`.
+
+To run in the background instead:
+
+```bash
+make up        # detached
+make logs      # follow logs
+make down      # stop everything
+```
+
+Ports exposed on the host:
 
 | Service | Port | Notes |
 |---|---|---|
 | `ingest-api` | `8080` | HTTP API + Swagger UI |
-| `postgres` | `5433` | Host port (5432 reserved for a local Postgres) |
+| `postgres` | `5433` | 5432 is reserved for a local Postgres instance |
 | `kafka` | `9094` | External listener for local tooling |
 | `elasticsearch` | `9200` | REST API |
 | `minio` | `9000` / `9001` | S3 API / Console UI |
 
-Follow logs:
+> **Why port 5433?** Docker maps PostgreSQL to `5433` to avoid conflicts with a local Postgres on `5432`. Inside the Docker network services always connect to `postgres:5432`.
+
+---
+
+## Database Migrations
+
+Migrations live in `db/migrations/` as numbered SQL files (`001_create_events.sql`, `002_...sql`, …). They are embedded into the `migrate` binary at build time.
 
 ```bash
-make logs
+# Apply all pending migrations
+make migrate
+
+# Against a custom DSN
+POSTGRES_DSN=postgres://user:pass@host:5432/db make migrate
 ```
 
-Stop everything:
+The runner creates a `schema_migrations` table to track which files have been applied. Each migration runs in its own transaction — if it fails, nothing is committed.
+
+To add a new migration, create the next numbered file:
 
 ```bash
-make down
+touch db/migrations/002_add_my_column.sql
+# edit the file, then:
+make migrate
 ```
-
-> **Why port 5433?** Docker maps PostgreSQL to `5433` on the host to avoid conflicts if you already have a local PostgreSQL instance running on the default `5432`. Inside the Docker network, services always use `postgres:5432`.
 
 ---
 
 ## Verify It Works
 
-Once `make up` completes, run the end-to-end smoke test:
+Once the API is running (either mode), run the end-to-end smoke test:
 
 ```bash
 make test-e2e
@@ -104,13 +178,13 @@ curl http://localhost:8080/events/order:1 \
   -H "X-API-Key: dev-api-key"
 ```
 
-> **Eventual consistency:** `GET /events/{streamID}` reads from Elasticsearch. Recently ingested events may not appear immediately — the consumer processes them asynchronously via Kafka. Events are always durable in PostgreSQL from the moment `POST /events` returns `201`.
+> **Eventual consistency:** `GET /events/{streamID}` reads from Elasticsearch. Recently ingested events may not appear immediately — the consumer processes them asynchronously via Kafka. Events are always durable in PostgreSQL the moment `POST /events` returns `201`.
 
 ---
 
 ## Swagger UI
 
-Interactive API docs are served by the running `ingest-api`:
+Interactive API docs are served by `ingest-api` at:
 
 ```
 http://localhost:8080/swagger/index.html
@@ -122,7 +196,7 @@ To authenticate in the UI:
 2. Enter `dev-api-key` in the **ApiKeyAuth** field
 3. Click **Authorize** → **Close**
 
-All `/events` endpoints are now unlocked. No separate Swagger container needed.
+All `/events` endpoints are now unlocked. No separate container needed.
 
 ---
 
@@ -130,9 +204,9 @@ All `/events` endpoints are now unlocked. No separate Swagger container needed.
 
 All `/events` endpoints require authentication. `/health` and `/swagger` are public.
 
-### Simple mode (default — local/dev)
+### Simple mode (default — dev)
 
-Pass the API key in the `X-API-Key` header:
+Pass the API key via the `X-API-Key` header:
 
 ```bash
 curl -X POST http://localhost:8080/events \
@@ -145,7 +219,7 @@ Configured via `AUTH_API_KEY` env var (default: `dev-api-key`).
 
 ### JWT mode (production / multi-tenant)
 
-Set in `.env` or via env vars:
+Set in `.env` or as env vars:
 
 ```bash
 AUTH_MODE=jwt
@@ -209,13 +283,13 @@ Response `201`:
   "type":        "order.created",
   "source":      "orders-svc",
   "version":     1,
-  "occurred_at": "2026-04-21T10:00:00Z",
+  "occurred_at": "2026-04-26T10:00:00Z",
   "payload":     {"amount": 99.99}
 }
 ```
 
 - `version` is assigned atomically by the store (`MAX + 1` per stream).
-- Kafka publish is best-effort — a Kafka failure does **not** fail this request. The event is already durable in PostgreSQL.
+- Kafka publish is best-effort — a Kafka failure does **not** fail this request.
 
 ### GET /events/{streamID} — Query (read model)
 
@@ -241,8 +315,6 @@ Response headers:
 - `X-Read-Model: elasticsearch`
 - `X-Data-Consistency: eventual`
 
-Results are **eventually consistent** with PostgreSQL. The `total` field reflects indexed events, which may lag by a few seconds.
-
 ### GET /health
 
 ```
@@ -255,7 +327,11 @@ No authentication required.
 
 ## Configuration
 
-All configuration is via environment variables. The defaults match `docker-compose.yml` and work out of the box.
+All configuration is via environment variables. Defaults work out of the box with `docker-compose.yml`.
+
+```bash
+cp .env.example .env  # then edit as needed
+```
 
 | Variable | Default | Description |
 |---|---|---|
@@ -270,37 +346,38 @@ All configuration is via environment variables. The defaults match `docker-compo
 | `ELASTICSEARCH_INDEX` | `events` | ES index name |
 | `AUTH_MODE` | `simple` | `simple` (API key) or `jwt` (Bearer token) |
 | `AUTH_API_KEY` | `dev-api-key` | Static API key for `simple` mode |
-| `AUTH_JWT_SECRET` | _(empty)_ | HMAC secret for `jwt` mode (required if `AUTH_MODE=jwt`) |
+| `AUTH_JWT_SECRET` | _(empty)_ | HMAC secret for `jwt` mode — required when `AUTH_MODE=jwt` |
 | `ADMIN_KEY` | `admin-secret` | Protects `POST /tenants` (tenant bootstrap) |
-
-Copy `.env.example` to `.env` to customise:
-
-```bash
-cp .env.example .env
-```
 
 ---
 
-## Local Development
-
-Run services locally against the Docker infrastructure (infra-only via `make up`):
+## Make Reference
 
 ```bash
-make run            # ingest-api on :8080
-make run-consumer   # consumer-service
-make run-replay     # replay-service on :50051
-```
+# Dev workflow
+make dev             # infra in Docker + ingest-api locally (fast iteration)
+make dev-consumer    # infra in Docker + consumer-service locally
+make wait-infra      # start infra only and wait for healthchecks
 
-Other tasks:
+# Full stack
+make dev-full        # everything in Docker, logs in foreground (production-like)
+make up              # everything in Docker, detached
+make down            # stop all containers
+make logs            # tail all logs
 
-```bash
-make test       # Unit tests
-make test-e2e   # End-to-end smoke test
-make build      # Compile all binaries → bin/
-make lint       # golangci-lint
-make tidy       # go mod tidy
-make swag       # Regenerate Swagger docs from annotations
-make proto      # Regenerate gRPC stubs from .proto files
+# Database
+make migrate         # apply pending SQL migrations
+
+# Testing
+make test            # unit tests
+make test-e2e        # end-to-end smoke test (requires running stack)
+
+# Build & tooling
+make build           # compile all binaries → bin/
+make lint            # golangci-lint
+make tidy            # go mod tidy
+make swag            # regenerate Swagger docs from annotations
+make proto           # regenerate gRPC stubs from .proto files
 ```
 
 ---
@@ -348,6 +425,7 @@ make proto      # Regenerate gRPC stubs from .proto files
 | Tenant bootstrap (`POST /tenants`) | Done |
 | Replay Engine (gRPC) | Done |
 | Swagger UI | Done |
+| Database migrations | Done |
 | Unit tests | Done |
 | E2E smoke test | Done |
 | Snapshots | Pending |
