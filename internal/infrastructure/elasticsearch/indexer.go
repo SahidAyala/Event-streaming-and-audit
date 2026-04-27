@@ -138,12 +138,23 @@ func (i *Indexer) Index(ctx context.Context, e *event.Event) error {
 	return nil
 }
 
-// Search queries events for a stream from Elasticsearch.
-// Results are scoped to q.TenantID, sorted by version ASC then id ASC for
-// deterministic ordering. Returns the matching events and total hit count.
+// Search queries events from Elasticsearch.
+//
+// Filtering:
+//   - q.StreamID non-empty → filter by stream (used by QueryByStream)
+//   - q.StreamID empty     → no stream filter, return events across all streams (used by ListAll)
+//   - q.TenantID non-empty → always applied when present
+//
+// Sorting:
+//   - default              → version ASC, id ASC (deterministic within a single stream)
+//   - SortByOccurredAtDesc → occurred_at DESC, id DESC (chronological feed, for cross-stream queries)
 func (i *Indexer) Search(ctx context.Context, q event.SearchQuery) ([]*event.Event, int64, error) {
-	filters := []map[string]any{
-		{"term": map[string]any{"stream_id": q.StreamID}},
+	// Build filters — only add a clause when the value is non-empty.
+	var filters []map[string]any
+	if q.StreamID != "" {
+		filters = append(filters, map[string]any{
+			"term": map[string]any{"stream_id": q.StreamID},
+		})
 	}
 	if q.TenantID != "" {
 		filters = append(filters, map[string]any{
@@ -151,14 +162,34 @@ func (i *Indexer) Search(ctx context.Context, q event.SearchQuery) ([]*event.Eve
 		})
 	}
 
-	body := map[string]any{
-		"query": map[string]any{
+	// Build query — match_all when there are no filters, bool/filter otherwise.
+	var esQuery map[string]any
+	if len(filters) == 0 {
+		esQuery = map[string]any{"match_all": map[string]any{}}
+	} else {
+		esQuery = map[string]any{
 			"bool": map[string]any{"filter": filters},
-		},
-		"sort": []map[string]any{
+		}
+	}
+
+	// Build sort — within a stream, version order is canonical; cross-stream,
+	// occurred_at gives a meaningful chronological feed.
+	var sort []map[string]any
+	if q.SortByOccurredAtDesc {
+		sort = []map[string]any{
+			{"occurred_at": map[string]string{"order": "desc"}},
+			{"id": map[string]string{"order": "desc"}},
+		}
+	} else {
+		sort = []map[string]any{
 			{"version": map[string]string{"order": "asc"}},
 			{"id": map[string]string{"order": "asc"}},
-		},
+		}
+	}
+
+	body := map[string]any{
+		"query":            esQuery,
+		"sort":             sort,
 		"from":             q.Offset,
 		"size":             q.Limit,
 		"track_total_hits": true,

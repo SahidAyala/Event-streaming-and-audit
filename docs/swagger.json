@@ -107,6 +107,58 @@
             }
         },
         "/events": {
+            "get": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns a paginated list of events across all streams, sorted by\noccurred_at DESC (newest first). Useful as an audit feed or event log.\n\nResults come from the Elasticsearch read model and are **eventually consistent**\nwith the PostgreSQL event store — recently ingested events may not appear immediately.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "events"
+                ],
+                "summary": "List all events",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Page size — default 20, max 100",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Number of events to skip — default 0",
+                        "name": "offset",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/internal_infrastructure_httpserver.ListEventsResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Missing or invalid credentials",
+                        "schema": {
+                            "$ref": "#/definitions/internal_infrastructure_httpserver.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Read model query failed",
+                        "schema": {
+                            "$ref": "#/definitions/internal_infrastructure_httpserver.ErrorResponse"
+                        }
+                    }
+                }
+            },
             "post": {
                 "security": [
                     {
@@ -481,6 +533,38 @@
                     "description": "Token is the signed JWT to use in subsequent requests as \"Authorization: Bearer \u003ctoken\u003e\".",
                     "type": "string",
                     "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                }
+            }
+        },
+        "internal_infrastructure_httpserver.ListEventsResponse": {
+            "type": "object",
+            "properties": {
+                "events": {
+                    "description": "Events is the page of events sorted by occurred_at DESC.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_infrastructure_httpserver.EventResponse"
+                    }
+                },
+                "limit": {
+                    "description": "Limit is the page size applied to this query.",
+                    "type": "integer",
+                    "example": 20
+                },
+                "offset": {
+                    "description": "Offset is the number of events skipped.",
+                    "type": "integer",
+                    "example": 0
+                },
+                "read_model": {
+                    "description": "ReadModel identifies the data source (\"elasticsearch\").",
+                    "type": "string",
+                    "example": "elasticsearch"
+                },
+                "total": {
+                    "description": "Total is the total number of events in the index (for pagination).",
+                    "type": "integer",
+                    "example": 128
                 }
             }
         },

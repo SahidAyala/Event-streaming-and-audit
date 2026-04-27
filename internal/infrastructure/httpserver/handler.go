@@ -15,6 +15,7 @@ import (
 	appauth "github.com/SheykoWk/event-streaming-and-audit/internal/application/auth"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/application/ingest"
 	"github.com/SheykoWk/event-streaming-and-audit/internal/application/query"
+	"github.com/SheykoWk/event-streaming-and-audit/internal/domain/event"
 	infraauth "github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/auth"
 	authmw "github.com/SheykoWk/event-streaming-and-audit/internal/infrastructure/httpserver/middleware"
 )
@@ -52,6 +53,7 @@ func NewRouter(ingestSvc *ingest.Service, querySvc *query.Service, authenticator
 	r.Route("/events", func(r chi.Router) {
 		r.Use(authmw.Auth(authenticator))
 		r.Post("/", h.ingest)
+		r.Get("/", h.listEvents)
 		r.Get("/{streamID}", h.getByStream)
 	})
 
@@ -255,6 +257,56 @@ func (h *handler) createTenant(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// listEvents godoc
+// @Summary      List all events
+// @Description  Returns a paginated list of events across all streams, sorted by
+// @Description  occurred_at DESC (newest first). Useful as an audit feed or event log.
+// @Description
+// @Description  Results come from the Elasticsearch read model and are **eventually consistent**
+// @Description  with the PostgreSQL event store — recently ingested events may not appear immediately.
+// @Tags         events
+// @Produce      json
+// @Security     ApiKeyAuth
+// @Security     BearerAuth
+// @Param        limit   query     int  false  "Page size — default 20, max 100"
+// @Param        offset  query     int  false  "Number of events to skip — default 0"
+// @Success      200     {object}  ListEventsResponse
+// @Failure      401     {object}  ErrorResponse  "Missing or invalid credentials"
+// @Failure      500     {object}  ErrorResponse  "Read model query failed"
+// @Router       /events [get]
+func (h *handler) listEvents(w http.ResponseWriter, r *http.Request) {
+	limit := parseIntParam(r, "limit", 20)
+	offset := parseIntParam(r, "offset", 0)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	result, err := h.querySvc.ListAll(ctx, query.ListQuery{
+		Limit:  limit,
+		Offset: offset,
+	})
+	if err != nil {
+		h.log.Error("list events failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	events := make([]EventResponse, len(result.Events))
+	for i, e := range result.Events {
+		events[i] = domainToEventResponse(e)
+	}
+
+	w.Header().Set("X-Read-Model", "elasticsearch")
+	w.Header().Set("X-Data-Consistency", "eventual")
+	writeJSON(w, http.StatusOK, ListEventsResponse{
+		Events:    events,
+		Total:     result.Total,
+		Limit:     result.Limit,
+		Offset:    result.Offset,
+		ReadModel: result.ReadModel,
+	})
+}
+
 // ingest godoc
 // @Summary      Ingest an event
 // @Description  Appends a new event to the specified stream. The event is persisted in PostgreSQL
@@ -341,9 +393,21 @@ func (h *handler) getByStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	events := make([]EventResponse, len(result.Events))
+	for i, e := range result.Events {
+		events[i] = domainToEventResponse(e)
+	}
+
 	w.Header().Set("X-Read-Model", "elasticsearch")
 	w.Header().Set("X-Data-Consistency", "eventual")
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, QueryResultResponse{
+		StreamID:  result.StreamID,
+		Events:    events,
+		Total:     result.Total,
+		Limit:     result.Limit,
+		Offset:    result.Offset,
+		ReadModel: result.ReadModel,
+	})
 }
 
 // parseIntParam reads an integer query parameter with a fallback default.
@@ -358,6 +422,22 @@ func parseIntParam(r *http.Request, key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// domainToEventResponse converts a domain Event to its HTTP response representation.
+// Keeping this mapping in the HTTP layer ensures the domain never leaks into the wire format.
+func domainToEventResponse(e *event.Event) EventResponse {
+	return EventResponse{
+		ID:         e.ID.String(),
+		TenantID:   e.TenantID,
+		StreamID:   e.StreamID,
+		Type:       e.Type,
+		Source:     e.Source,
+		Version:    e.Version,
+		OccurredAt: e.OccurredAt,
+		Payload:    e.Payload,
+		Metadata:   e.Metadata,
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

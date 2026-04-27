@@ -35,11 +35,16 @@ type Indexer interface {
 
 // SearchQuery carries parameters for reading from the read model.
 // TenantID must be set by the application layer; the Searcher filters results to this tenant.
+// StreamID is optional — omit it to query across all streams.
 type SearchQuery struct {
 	TenantID string
-	StreamID string
+	StreamID string // empty = no stream filter (list all)
 	Limit    int
 	Offset   int
+
+	// SortByOccurredAtDesc sorts by occurred_at DESC instead of version ASC.
+	// Use for cross-stream queries where per-stream version ordering is meaningless.
+	SortByOccurredAtDesc bool
 }
 
 // Searcher is the outbound port for the Elasticsearch read model.

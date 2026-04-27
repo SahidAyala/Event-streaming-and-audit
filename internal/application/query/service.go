@@ -32,6 +32,22 @@ type Result struct {
 	ReadModel string         `json:"read_model"`
 }
 
+// ListQuery carries the parameters for listing events across all streams.
+type ListQuery struct {
+	Limit  int
+	Offset int
+}
+
+// ListResult is the paginated response from ListAll.
+// Unlike Result it has no StreamID since it spans multiple streams.
+type ListResult struct {
+	Events    []*event.Event `json:"events"`
+	Total     int64          `json:"total"`
+	Limit     int            `json:"limit"`
+	Offset    int            `json:"offset"`
+	ReadModel string         `json:"read_model"`
+}
+
 // Service handles event query use cases against the read model.
 type Service struct {
 	searcher event.Searcher
@@ -40,6 +56,55 @@ type Service struct {
 
 func NewService(searcher event.Searcher, log *slog.Logger) *Service {
 	return &Service{searcher: searcher, log: log}
+}
+
+// ListAll retrieves a paginated list of all events across all streams from the
+// read model, sorted by occurred_at DESC (newest first — useful as an audit feed).
+// Results are scoped to the caller's tenant.
+func (s *Service) ListAll(ctx context.Context, q ListQuery) (*ListResult, error) {
+	identity, ok := appauth.IdentityFromContext(ctx)
+	if !ok || identity.TenantID == "" {
+		return nil, fmt.Errorf("unauthenticated: identity with tenant_id is required")
+	}
+
+	if q.Limit <= 0 {
+		q.Limit = defaultLimit
+	}
+	if q.Limit > maxLimit {
+		q.Limit = maxLimit
+	}
+	if q.Offset < 0 {
+		q.Offset = 0
+	}
+
+	events, total, err := s.searcher.Search(ctx, event.SearchQuery{
+		TenantID:             identity.TenantID,
+		// StreamID intentionally empty — no stream filter
+		Limit:                q.Limit,
+		Offset:               q.Offset,
+		SortByOccurredAtDesc: true,
+	})
+	if err != nil {
+		s.log.Error("read model list failed",
+			"tenant_id", identity.TenantID,
+			"limit", q.Limit,
+			"offset", q.Offset,
+			"error", err,
+		)
+		return nil, fmt.Errorf("list events: %w", err)
+	}
+
+	if events == nil {
+		events = []*event.Event{}
+	}
+
+	return &ListResult{
+		Events:    events,
+		Total:     total,
+		Limit:     q.Limit,
+		Offset:    q.Offset,
+		ReadModel: "elasticsearch",
+	}, nil
 }
 
 // QueryByStream retrieves a paginated, ordered page of events for a stream

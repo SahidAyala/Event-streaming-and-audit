@@ -122,3 +122,19 @@ type QueryResultResponse struct {
 	// ReadModel identifies the data source ("elasticsearch").
 	ReadModel string `json:"read_model" example:"elasticsearch"`
 }
+
+// ListEventsResponse is the paginated read-model response for GET /events.
+// Returns events across all streams, sorted by occurred_at DESC (newest first).
+// Results come from Elasticsearch and are eventually consistent with PostgreSQL.
+type ListEventsResponse struct {
+	// Events is the page of events sorted by occurred_at DESC.
+	Events []EventResponse `json:"events"`
+	// Total is the total number of events in the index (for pagination).
+	Total int64 `json:"total" example:"128"`
+	// Limit is the page size applied to this query.
+	Limit int `json:"limit" example:"20"`
+	// Offset is the number of events skipped.
+	Offset int `json:"offset" example:"0"`
+	// ReadModel identifies the data source ("elasticsearch").
+	ReadModel string `json:"read_model" example:"elasticsearch"`
+}

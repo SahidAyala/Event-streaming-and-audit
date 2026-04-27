@@ -134,6 +134,30 @@ definitions:
         example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
         type: string
     type: object
+  internal_infrastructure_httpserver.ListEventsResponse:
+    properties:
+      events:
+        description: Events is the page of events sorted by occurred_at DESC.
+        items:
+          $ref: '#/definitions/internal_infrastructure_httpserver.EventResponse'
+        type: array
+      limit:
+        description: Limit is the page size applied to this query.
+        example: 20
+        type: integer
+      offset:
+        description: Offset is the number of events skipped.
+        example: 0
+        type: integer
+      read_model:
+        description: ReadModel identifies the data source ("elasticsearch").
+        example: elasticsearch
+        type: string
+      total:
+        description: Total is the total number of events in the index (for pagination).
+        example: 128
+        type: integer
+    type: object
   internal_infrastructure_httpserver.QueryResultResponse:
     properties:
       events:
@@ -303,6 +327,43 @@ paths:
       tags:
       - auth
   /events:
+    get:
+      description: |-
+        Returns a paginated list of events across all streams, sorted by
+        occurred_at DESC (newest first). Useful as an audit feed or event log.
+
+        Results come from the Elasticsearch read model and are **eventually consistent**
+        with the PostgreSQL event store — recently ingested events may not appear immediately.
+      parameters:
+      - description: Page size — default 20, max 100
+        in: query
+        name: limit
+        type: integer
+      - description: Number of events to skip — default 0
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_infrastructure_httpserver.ListEventsResponse'
+        "401":
+          description: Missing or invalid credentials
+          schema:
+            $ref: '#/definitions/internal_infrastructure_httpserver.ErrorResponse'
+        "500":
+          description: Read model query failed
+          schema:
+            $ref: '#/definitions/internal_infrastructure_httpserver.ErrorResponse'
+      security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+      summary: List all events
+      tags:
+      - events
     post:
       consumes:
       - application/json
